@@ -1,2655 +1,1328 @@
 AWSTemplateFormatVersion: "2010-09-09"
 
-
-
 Description: "Subsystem for notification"
 
-
-
 Parameters:
-
   FirstDeploy:
-
     Description: Is this the first deployment.
-
     Default: "false"
-
     Type: String
-
     AllowedValues:
-
       - "true"
-
       - "false"
-
     ConstraintDescription: must specify true or false
-
   DeployTransferService:
-
     Description: Do we deploy the transfer server.
-
     Default: "false"
-
     Type: String
-
     AllowedValues:
-
       - "true"
-
       - "false"
-
     ConstraintDescription: must specify true or false
-
   CodeBucket:
-
     Type: String
-
     Description: Code Bucket
-
   Version:
-
     Type: String
-
     Description: Version being deployed
-
   RxArn:
-
     Type: String
-
     Description: ARN of RX function
-
     Default: ""
-
   apiGatewayStageName:
-
     Type: String
-
     Default: "api"
 
-
-
 Conditions:
-
   CreateNotification: !Equals [!Ref FirstDeploy, "false"]
-
   DeployTransfer: !Equals [!Ref DeployTransferService, "true"]
 
-
-
 Mappings:
-
   RegionMap:
-
     eu-west-1:
-
       DynamoPrefixList: pl-6fa54006 # DynamoDB eu-west-1
-
       S3PrefixList: pl-6da54004 # S3 eu-west-1
-
     eu-west-2:
-
       DynamoPrefixList: pl-b3a742da # DynamoDB eu-west-2
-
       S3PrefixList: pl-7ca54015 # S3 eu-west-2
 
-
-
 Resources:
-
   # Networking resources
 
-
-
   # The VPC that everything lives in
-
   VPC:
-
     Type: AWS::EC2::VPC
-
     Properties:
-
       EnableDnsSupport: True
-
       EnableDnsHostnames: True
-
       CidrBlock: 10.0.0.0/16
 
-
-
   # Public subnet in the first availability zone
-
   PublicSubnet1:
-
     Type: AWS::EC2::Subnet
-
     Properties:
-
       VpcId: !Ref VPC
-
       AvailabilityZone: !Select [0, !GetAZs ""]
-
       CidrBlock: 10.0.1.0/24
-
       MapPublicIpOnLaunch: true
-
-
 
   # Public subnet in the second availability zone
-
   PublicSubnet2:
-
     Type: AWS::EC2::Subnet
-
     Properties:
-
       VpcId: !Ref VPC
-
       AvailabilityZone: !Select [1, !GetAZs ""]
-
       CidrBlock: 10.0.2.0/24
-
       MapPublicIpOnLaunch: true
-
-
 
   # Public subnet in the first availability zone
-
   PrivateSubnet1:
-
     Type: AWS::EC2::Subnet
-
     Properties:
-
       AvailabilityZone: !Select
-
         - 0
-
         - !GetAZs ""
-
       CidrBlock: 10.0.4.0/24
-
       VpcId: !Ref VPC
-
   # Public subnet in the second availability zone
-
   PrivateSubnet2:
-
     Type: AWS::EC2::Subnet
-
     Properties:
-
       AvailabilityZone: !Select
-
         - 1
-
         - !GetAZs ""
-
       CidrBlock: 10.0.3.0/24
-
       VpcId: !Ref VPC
-
   # Elastic IP for NAT gateway (1st zone)
-
   NatGateway1EIP:
-
     Type: AWS::EC2::EIP
-
     DependsOn: GatewayAssociation
-
     Properties:
-
       Domain: vpc
-
-
 
   # Elastic IP for NAT gateway (2nd zone)
-
   NatGateway2EIP:
-
     Type: AWS::EC2::EIP
-
     DependsOn: GatewayAssociation
-
     Properties:
-
       Domain: vpc
 
-
-
   # NAT gateway (1st zone)
-
   NatGateway1:
-
     Type: AWS::EC2::NatGateway
-
     Properties:
-
       AllocationId: !GetAtt NatGateway1EIP.AllocationId
-
       SubnetId: !Ref PublicSubnet1
-
-
 
   # NAT gateway (2nd zone)
-
   NatGateway2:
-
     Type: AWS::EC2::NatGateway
-
     Properties:
-
       AllocationId: !GetAtt NatGateway2EIP.AllocationId
-
       SubnetId: !Ref PublicSubnet2
-
-
 
   # Routing table for public subnets
-
   PublicRouteTable:
-
     Type: AWS::EC2::RouteTable
-
     Properties:
-
       VpcId: !Ref VPC
-
       Tags:
-
         - Key: Name
-
           Value: Public Routes
 
-
-
   # Default route to send traffic from public subnets to Gateway
-
   DefaultPublicRoute:
-
     Type: AWS::EC2::Route
-
     DependsOn: GatewayAssociation
-
     Properties:
-
       RouteTableId: !Ref PublicRouteTable
-
       DestinationCidrBlock: 0.0.0.0/0
-
       GatewayId: !Ref Gateway
 
-
-
   # Link public route table to public subnet 1
-
   PublicSubnet1RouteTableAssociation:
-
     Type: AWS::EC2::SubnetRouteTableAssociation
-
     Properties:
-
       RouteTableId: !Ref PublicRouteTable
-
       SubnetId: !Ref PublicSubnet1
 
-
-
   # Link public route table to public subnet 2
-
   PublicSubnet2RouteTableAssociation:
-
     Type: AWS::EC2::SubnetRouteTableAssociation
-
     Properties:
-
       RouteTableId: !Ref PublicRouteTable
-
       SubnetId: !Ref PublicSubnet2
 
-
-
   # Private route table 1
-
   PrivateRouteTable1:
-
     Type: AWS::EC2::RouteTable
-
     Properties:
-
       VpcId: !Ref VPC
-
   # Private route table 2
-
   PrivateRouteTable2:
-
     Type: AWS::EC2::RouteTable
-
     Properties:
-
       VpcId: !Ref VPC
-
-
 
   # Associate private route table 1 to private subnet 1
-
   PrivateRouteTable1Association:
-
     Type: AWS::EC2::SubnetRouteTableAssociation
-
     Properties:
-
       RouteTableId: !Ref PrivateRouteTable1
-
       SubnetId: !Ref PrivateSubnet1
 
-
-
   # Associate private route table 2 to private subnet 2
-
   PrivateRouteTable2Association:
-
     Type: AWS::EC2::SubnetRouteTableAssociation
-
     Properties:
-
       RouteTableId: !Ref PrivateRouteTable2
-
       SubnetId: !Ref PrivateSubnet2
-
   # Set default routes from private subnet to NAT gateways
-
   DefaultPrivateRoute1:
-
     Type: AWS::EC2::Route
-
     Properties:
-
       RouteTableId: !Ref PrivateRouteTable1
-
       DestinationCidrBlock: 0.0.0.0/0
-
       NatGatewayId: !Ref NatGateway1
-
   # Set default routes from private subnet to NAT gateways
-
   DefaultPrivateRoute2:
-
     Type: AWS::EC2::Route
-
     Properties:
-
       RouteTableId: !Ref PrivateRouteTable2
-
       DestinationCidrBlock: 0.0.0.0/0
-
       NatGatewayId: !Ref NatGateway2
 
-
-
   # VPC security group that only allows traffic outbound on port 443 (for Gov.Notify service)
-
   # and to S3 and Dynamo
-
   NoIngressSecurityGroup:
-
     Type: AWS::EC2::SecurityGroup
-
     Properties:
-
       GroupName: "no-ingress-sg"
-
       GroupDescription: "Security group with no ingress rule"
-
       VpcId: !Ref VPC
-
       SecurityGroupEgress:
-
         - IpProtocol: "tcp"
-
           CidrIp: 0.0.0.0/0
-
           ToPort: 443
-
           FromPort: 443
-
         - DestinationPrefixListId:
-
             !FindInMap [RegionMap, !Ref "AWS::Region", DynamoPrefixList]
-
           IpProtocol: "-1"
-
         - DestinationPrefixListId:
-
             !FindInMap [RegionMap, !Ref "AWS::Region", S3PrefixList]
-
           IpProtocol: "-1"
-
-
 
   # Internet Gateway which connects VPC to Internet
-
   Gateway:
-
     Type: AWS::EC2::InternetGateway
 
-
-
   # Associates gateway with VPC
-
   GatewayAssociation:
-
     Type: AWS::EC2::VPCGatewayAttachment
-
     Properties:
-
       VpcId: !Ref VPC
-
       InternetGatewayId: !Ref Gateway
 
-
-
   # VPC endpoint for DynamoDB allowing connection from Private subnets
-
   DynamodDBEndpoint:
-
     Type: AWS::EC2::VPCEndpoint
-
     Properties:
-
       PolicyDocument:
-
         Version: 2012-10-17
-
         Statement:
-
           - Effect: Allow
-
             Action: "*"
-
             Principal: "*"
-
             Resource: "*"
-
       RouteTableIds:
-
         - !Ref PrivateRouteTable1
-
         - !Ref PrivateRouteTable2
-
       ServiceName: !Sub com.amazonaws.${AWS::Region}.dynamodb
-
       VpcId: !Ref VPC
-
-
 
   # VPC endpoint for DynamoDB allowing connection from Private subnets
-
   S3Endpoint:
-
     Type: AWS::EC2::VPCEndpoint
-
     Properties:
-
       PolicyDocument:
-
         Version: 2012-10-17
-
         Statement:
-
           - Effect: Allow
-
             Action: "*"
-
             Principal: "*"
-
             Resource: "*"
-
       RouteTableIds:
-
         - !Ref PrivateRouteTable1
-
         - !Ref PrivateRouteTable2
-
       ServiceName: !Sub com.amazonaws.${AWS::Region}.s3
-
       VpcId: !Ref VPC
-
-
 
   NotifyAPICredentials:
-
     Type: "AWS::SecretsManager::Secret"
-
     Properties:
-
       Description: Dummy credentials to be overwritten in console
-
       SecretString: '{"serviceID":"serviceID","apiKey":"apiKey"}'
 
-
-
   CallbackAuthToken:
-
     Type: "AWS::SecretsManager::Secret"
-
     Properties:
-
       Description: Dummy token to be overwritten in console
-
       SecretString: '{"authToken":"authToken"}'
 
-
-
   NotifySMSTemplateIds:
-
     Type: "AWS::SecretsManager::Secret"
-
     Properties:
-
       Description: Dummy SMS templates to be overwritten in console
-
       SecretString: '{"SMSTemplateDay_1":"SMSTemplateDay_1","SMSTemplateDay_2":"SMSTemplateDay_2","SMSTemplateDay_3":"SMSTemplateDay_3","SMSTemplateDay_4":"SMSTemplateDay_4","SMSTemplateDay_5":"SMSTemplateDay_5","SMSTemplateDay_6":"SMSTemplateDay_6","SMSTemplateDay_7":"SMSTemplateDay_7","SMSTemplateDay_8":"SMSTemplateDay_8","SMSTemplateDay_9":"SMSTemplateDay_9","SMSTemplateDay_10":"SMSTemplateDay_10","SMSTemplateDay_11":"SMSTemplateDay_11","SMSTemplateDay_12":"SMSTemplateDay_12","SMSTemplateDay_13":"SMSTemplateDay_13","SMSTemplateDay_14":"SMSTemplateDay_14","SMSTemplateDay_15":"SMSTemplateDay_15"}'
 
-
-
   NotifyEmailTemplateIds:
-
     Type: "AWS::SecretsManager::Secret"
-
     Properties:
-
       Description: Dummy Email templates to be overwritten in console
-
       SecretString: '{"EmailTemplateDay_1":"EmailTemplateDay_1","EmailTemplateDay_2":"EmailTemplateDay_2","EmailTemplateDay_3":"EmailTemplateDay_3","EmailTemplateDay_4":"EmailTemplateDay_4","EmailTemplateDay_5":"EmailTemplateDay_5","EmailTemplateDay_6":"EmailTemplateDay_6","EmailTemplateDay_7":"EmailTemplateDay_7","EmailTemplateDay_8":"EmailTemplateDay_8","EmailTemplateDay_9":"EmailTemplateDay_9","EmailTemplateDay_10":"EmailTemplateDay_10","EmailTemplateDay_11":"EmailTemplateDay_11","EmailTemplateDay_12":"EmailTemplateDay_12","EmailTemplateDay_13":"EmailTemplateDay_13","EmailTemplateDay_14":"EmailTemplateDay_14","EmailTemplateDay_15":"EmailTemplateDay_15"}'
 
-
-
   # Policy which allows read access to the decryption secret for the RX function
-
   NotifySecretAccessPolicy:
-
     Type: AWS::IAM::ManagedPolicy
-
     Properties:
-
       PolicyDocument:
-
         Version: 2012-10-17
-
         Statement:
-
           - Effect: Allow
-
             Action:
-
               - secretsmanager:GetSecretValue
-
             Resource: !Ref NotifyAPICredentials
 
-
-
   # Policy which allows read acces to the secret for the API auth token          
-
   CallbackAuthTokenPolicy:
-
     Type: AWS::IAM::ManagedPolicy
-
     Properties:
-
       PolicyDocument:
-
         Version: 2012-10-17
-
         Statement:
-
           - Effect: Allow
-
             Action:
-
               - secretsmanager:GetSecretValue
-
             Resource: !Ref CallbackAuthToken          
 
-
-
   # Policy which allows read access to the decryption secret for the RX function
-
   NotifySMSTemplateSecretAccessPolicy:
-
     Type: AWS::IAM::ManagedPolicy
-
     Properties:
-
       PolicyDocument:
-
         Version: 2012-10-17
-
         Statement:
-
           - Effect: Allow
-
             Action:
-
               - secretsmanager:GetSecretValue
-
             Resource: !Ref NotifySMSTemplateIds            
 
-
-
   # Policy which allows read access to the decryption secret for the RX function
-
   NotifyEmailTemplateSecretAccessPolicy:
-
     Type: AWS::IAM::ManagedPolicy
-
     Properties:
-
       PolicyDocument:
-
         Version: 2012-10-17
-
         Statement:
-
           - Effect: Allow
-
             Action:
-
               - secretsmanager:GetSecretValue
-
             Resource: !Ref NotifyEmailTemplateIds
 
-
-
   # Policy which allows read access to the decryption secret for the RX function
-
   IncomingDataSecretAccessPolicy:
-
     Type: AWS::IAM::ManagedPolicy
-
     Properties:
-
       PolicyDocument:
-
         Version: 2012-10-17
-
         Statement:
-
           - Effect: Allow
-
             Action:
-
               - secretsmanager:GetSecretValue
-
             Resource: arn:aws:secretsmanager:eu-west-2:997555237822:secret:prod/isolation-support/ctas-data-extract-9FRiwi
-
           - Effect: Allow
-
             Action:
-
               - kms:Decrypt
-
             Resource: "arn:aws:kms:eu-west-2:997555237822:key/bdb6915d-5429-4fde-b105-8eb4d7edc1c4"
 
-
-
   # Policy which allows write access to Dynamo for the RX function
-
   DynamoWritePolicy:
-
     Type: AWS::IAM::ManagedPolicy
-
     Properties:
-
       PolicyDocument:
-
         Version: 2012-10-17
-
         Statement:
-
           - Effect: Allow
-
             Action:
-
               - dynamodb:PutItem
-
             Resource: !GetAtt TrackingTable.Arn
-
-
 
   # Policy allowing update of items in Dynamo (for updating when action is next required)
-
   DynamoUpdatePolicy:
-
     Type: AWS::IAM::ManagedPolicy
-
     Properties:
-
       PolicyDocument:
-
         Version: 2012-10-17
-
         Statement:
-
           - Effect: Allow
-
             Action:
-
               - dynamodb:UpdateItem
-
             Resource: !GetAtt TrackingTable.Arn
-
-
 
   # Allow querying of dynamo - for example when getting the list of people to process
-
   DynamoReadPolicy:
-
     Type: AWS::IAM::ManagedPolicy
-
     Properties:
-
       PolicyDocument:
-
         Version: 2012-10-17
-
         Statement:
-
           - Effect: Allow
-
             Action:
-
               - dynamodb:Query
-
               - dynamodb:GetItem
-
             Resource: !GetAtt TrackingTable.Arn
 
-
-
   # Allow use of GetItem against dynamo table
-
   DynamoGetItemPolicy:
-
     Type: AWS::IAM::ManagedPolicy
-
     Properties:
-
       PolicyDocument:
-
         Version: 2012-10-17
-
         Statement:
-
           - Effect: Allow
-
             Action:
-
               - dynamodb:GetItem
-
             Resource: !GetAtt TrackingTable.Arn            
 
-
-
   # Allows read access to our internal "source" data bucket
-
   # Note that this policy will only be relevant in production
-
   ProductionS3ReadPolicy:
-
     Type: AWS::IAM::ManagedPolicy
-
     Properties:
-
       PolicyDocument:
-
         Version: 2012-10-17
-
         Statement:
-
           - Effect: Allow
-
             Action:
-
               - s3:GetObject
-
               - s3:ListBucket
-
             Resource:
-
               - "arn:aws:s3:::phe-ctas-isolation-data-extracts"
-
               - "arn:aws:s3:::phe-ctas-isolation-data-extracts/*"
 
-
-
   # Allows read access to our internal "source" data bucket
-
   # Note that this policy won't be relevant in the production environment
-
   S3ReadPolicy:
-
     Type: AWS::IAM::ManagedPolicy
-
     Properties:
-
       PolicyDocument:
-
         Version: 2012-10-17
-
         Statement:
-
           - Effect: Allow
-
             Action:
-
               - s3:GetObject
-
             Resource: !Sub "arn:aws:s3:::${DataBucket}/*"
 
-
-
   # Allows read access to our internal "source" data bucket
-
   # Note that this policy won't be relevant in the production environment
-
   S3ListPolicy:
-
     Type: AWS::IAM::ManagedPolicy
-
     Properties:
-
       PolicyDocument:
-
         Version: 2012-10-17
-
         Statement:
-
           - Effect: Allow
-
             Action:
-
               - s3:ListBucket
-
             Resource: !Sub "arn:aws:s3:::${DataBucket}"
 
-
-
   # Allows the function to decrypt data held in our S3 bucket
-
   KMSAccessPolicy:
-
     Type: AWS::IAM::ManagedPolicy
-
     Properties:
-
       PolicyDocument:
-
         Version: 2012-10-17
-
         Statement:
-
           - Effect: Allow
-
             Action:
-
               - kms:Decrypt
-
               - kms:GenerateDataKey
-
             Resource: !GetAtt DataStorageKey.Arn
 
-
-
   # The role for the RX function
-
   RxRole:
-
     Type: AWS::IAM::Role
-
     Properties:
-
       AssumeRolePolicyDocument:
-
         Version: 2012-10-17
-
         Statement:
-
           - Effect: Allow
-
             Principal:
-
               Service:
-
                 - lambda.amazonaws.com
-
             Action:
-
               - "sts:AssumeRole"
-
       ManagedPolicyArns:
-
         - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole" # Allows for logging
-
         - "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole" # Allows for working in a VPC
-
         - !Ref DynamoWritePolicy # Can write to DynamoDB
-
         - !Ref KMSAccessPolicy # Can decrypt files in our S3 bucket and in Dynamo
-
         - !Ref S3ReadPolicy # Can read from our S3 bucket
-
         - !Ref ProductionS3ReadPolicy # Can read from the production S3 bucket
-
         - !Ref IncomingDataSecretAccessPolicy # Can read incoming data decryption key
 
-
-
   # The role for the transmitter functions (likely to be the same across multiple functions)
-
   TxRole:
-
     Type: AWS::IAM::Role
-
     Properties:
-
       AssumeRolePolicyDocument:
-
         Version: 2012-10-17
-
         Statement:
-
           - Effect: Allow
-
             Principal:
-
               Service:
-
                 - lambda.amazonaws.com
-
             Action:
-
               - "sts:AssumeRole"
-
       ManagedPolicyArns:
-
         - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole" # Allows for logging
-
         - "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole" # Allows for working in VPC
-
         - !Ref DynamoReadPolicy # Can query dynamodb
-
         - !Ref DynamoUpdatePolicy # Can update dynamodb
-
         - !Ref KMSAccessPolicy # Can decrypt data in DynamoDB
-
         - !Ref NotifySecretAccessPolicy # Can get creds for notify
-
         - !Ref NotifySMSTemplateSecretAccessPolicy # Can get templates for SMS messages
-
         - !Ref NotifyEmailTemplateSecretAccessPolicy # Can get templates for Email messages
-
         - !Ref DataOutputPolicy
 
-
-
         # The role for the callback functions
-
   CallbackRole:
-
     Type: AWS::IAM::Role
-
     Properties:
-
       AssumeRolePolicyDocument:
-
         Version: 2012-10-17
-
         Statement:
-
           - Effect: Allow
-
             Principal:
-
               Service:
-
                 - lambda.amazonaws.com
-
             Action:
-
               - "sts:AssumeRole"
-
       ManagedPolicyArns:
-
         - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole" # Allows for logging
-
         - "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole" # Allows for working in VPC
-
         - !Ref DynamoWritePolicy # Can write to DynamoDB        
-
         - !Ref DynamoUpdatePolicy # Can update dynamodb
-
         - !Ref KMSAccessPolicy # Can decrypt data in dynamodb
-
   # The role for the auth functions
-
   AuthRole:
-
     Type: AWS::IAM::Role
-
     Properties:
-
       AssumeRolePolicyDocument:
-
         Version: 2012-10-17
-
         Statement:
-
           - Effect: Allow
-
             Principal:
-
               Service:
-
                 - lambda.amazonaws.com
-
             Action:
-
               - "sts:AssumeRole"
-
       ManagedPolicyArns:
-
         - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole" # Allows for logging
-
         - "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole" # Allows for working in VPC
-
         - !Ref CallbackAuthTokenPolicy # Can get creds for notify
 
-
-
   # Key for encrypting data in our S3 bucket and in DynamoDB
-
   DataStorageKey:
-
     Type: AWS::KMS::Key
-
     Properties:
-
       Description: Used to encrypt data at rest
-
       Enabled: True
-
       EnableKeyRotation: True
-
       KeyPolicy:
-
         Version: 2012-10-17
-
         Statement:
-
           - Sid: Enable IAM user permissions
-
             Effect: Allow
-
             Principal:
-
               AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
-
             Action: "kms:*"
-
             Resource: "*" # KMS permissions use * to refer to whole key
 
-
-
   # The dynamodb table that manages our data
-
   TrackingTable:
-
     Type: AWS::DynamoDB::Table
-
     Properties:
-
       AttributeDefinitions:
-
         - AttributeName: "k"
-
           AttributeType: "S"
-
         - AttributeName: "s"
-
           AttributeType: "S"
-
       KeySchema:
-
         - AttributeName: "k"
-
           KeyType: "HASH"
-
         - AttributeName: "s"
-
           KeyType: "RANGE"
-
       BillingMode: "PAY_PER_REQUEST"
-
       SSESpecification:
-
         KMSMasterKeyId: !GetAtt DataStorageKey.Arn
-
         SSEType: "KMS"
-
         SSEEnabled: True
-
       TimeToLiveSpecification:
-
         AttributeName: "ttl" # Field used to control time to live
-
         Enabled: True
-
       PointInTimeRecoverySpecification:
-
         PointInTimeRecoveryEnabled: True # Backup enabled
 
-
-
   # Our local data bucket to which our Rx function will subscribe
-
   DataBucket:
-
     Type: AWS::S3::Bucket
-
     Properties:
-
       VersioningConfiguration:
-
         Status: Enabled    
-
       AccessControl: Private
-
       BucketEncryption:
-
         ServerSideEncryptionConfiguration:
-
           - ServerSideEncryptionByDefault:
-
               KMSMasterKeyID: !GetAtt DataStorageKey.Arn
-
               SSEAlgorithm: aws:kms
-
       PublicAccessBlockConfiguration:
-
         BlockPublicAcls: True
-
         BlockPublicPolicy: True
-
         IgnorePublicAcls: True
-
         RestrictPublicBuckets: True
-
       NotificationConfiguration:
-
         Fn::If:
-
           - CreateNotification
-
           - LambdaConfigurations:
-
               - Function: !Ref RxArn
-
                 Event: "s3:ObjectCreated:*"
-
           - !Ref AWS::NoValue
-
       LoggingConfiguration:
-
         DestinationBucketName: !Ref DataBucketLog
-
         LogFilePrefix: databucket-logs
 
-
-
   # This is the bucket for logs from the DataBucket
-
   DataBucketLog:
-
     Type: AWS::S3::Bucket
-
     Properties:
-
       AccessControl: LogDeliveryWrite
-
       BucketEncryption:
-
         ServerSideEncryptionConfiguration:
-
           - ServerSideEncryptionByDefault:
-
               KMSMasterKeyID: !GetAtt DataStorageKey.Arn
-
               SSEAlgorithm: aws:kms
-
       PublicAccessBlockConfiguration:
-
         BlockPublicAcls: True
-
         BlockPublicPolicy: True
-
         IgnorePublicAcls: True
-
         RestrictPublicBuckets: True       
 
-
-
   # Log group for the callback function
-
   CallbackFunctionLogGroup:
-
     Type: AWS::Logs::LogGroup
-
     Properties:
-
       LogGroupName: !Sub /aws/lambda/${CallbackFunction}
-
       RetentionInDays: 7
-
-
 
   # The callback Function specification
-
   CallbackFunction:
-
     Type: AWS::Lambda::Function
-
     Properties:
-
       Runtime: go1.x
-
       Code:
-
         S3Bucket: !Ref CodeBucket
-
         S3Key: !Sub "callback-v${Version}.zip"
-
       Handler: main
-
       MemorySize: 384
-
       Timeout: 15
-
       Environment:
-
         Variables:
-
           Region: !Ref "AWS::Region"
-
           TableName: !Ref TrackingTable
-
       Role: !GetAtt CallbackRole.Arn
-
       VpcConfig:
-
         SecurityGroupIds:
-
           - !Ref NoIngressSecurityGroup
-
         SubnetIds:
-
           - !Ref PrivateSubnet1
-
           - !Ref PrivateSubnet2
-
-
 
   # Log group for the authoriser function
-
   AuthoriserFunctionLogGroup:
-
     Type: AWS::Logs::LogGroup
-
     Properties:
-
       LogGroupName: !Sub /aws/lambda/${AuthoriserFunction}
-
       RetentionInDays: 7
-
-
 
   # The authoriser Function specification
-
   AuthoriserFunction:
-
     Type: AWS::Lambda::Function
-
     Properties:
-
       Runtime: go1.x
-
       Code:
-
         S3Bucket: !Ref CodeBucket
-
         S3Key: !Sub "auth-v${Version}.zip"
-
       Handler: main
-
       MemorySize: 384
-
       Timeout: 15
-
       Environment:
-
         Variables:
-
           AuthSecretArn: !Ref CallbackAuthToken
-
       Role: !GetAtt AuthRole.Arn
-
       VpcConfig:
-
         SecurityGroupIds:
-
           - !Ref NoIngressSecurityGroup
-
         SubnetIds:
-
           - !Ref PrivateSubnet1
-
           - !Ref PrivateSubnet2
-
-
 
   # Log group for the RX function
-
   RxFunctionLogGroup:
-
     Type: AWS::Logs::LogGroup
-
     Properties:
-
       LogGroupName: !Sub /aws/lambda/${RxFunction}
-
       RetentionInDays: 7
-
-
 
   # The RX Function specification
-
   RxFunction:
-
     Type: AWS::Lambda::Function
-
     Properties:
-
       Runtime: go1.x
-
       Code:
-
         S3Bucket: !Ref CodeBucket
-
         S3Key: !Sub "rx-v${Version}.zip"
-
       Handler: main
-
       MemorySize: 384
-
       Timeout: 900
-
       Environment:
-
         Variables:
-
           TableName: !Ref TrackingTable
-
           Region: !Ref "AWS::Region"
-
           SecretARN: "arn:aws:secretsmanager:eu-west-2:997555237822:secret:prod/isolation-support/ctas-data-extract-9FRiwi"
-
       Role: !GetAtt RxRole.Arn
-
       VpcConfig:
-
         SecurityGroupIds:
-
           - !Ref NoIngressSecurityGroup
-
         SubnetIds:
-
           - !Ref PrivateSubnet1
-
           - !Ref PrivateSubnet2
-
-
 
   # Daily SMS function log group
-
   TxDailySMSFunctionLogGroup:
-
     Type: AWS::Logs::LogGroup
-
     Properties:
-
       LogGroupName: !Sub /aws/lambda/${TxDailySMSFunction}
-
       RetentionInDays: 7
-
-
 
   # Schedule for triggering Daily SMS function
-
   TxDailySMSCronEvent: # logical name of the resource
-
     Type: AWS::Events::Rule
-
     Properties:
-
       ScheduleExpression: cron(0 7-19 * * ? *) #when the event should trigger (UTC)
-
       Targets:
-
         - Arn: !GetAtt TxDailySMSFunction.Arn
-
           Id: !Ref TxDailySMSFunction #unique name of the target
 
-
-
   # Permission to allow the function to be triggered by the cron event
-
   TxDailySMSLambdaInvokePermission: #logical name of the resource
-
     Type: AWS::Lambda::Permission
-
     Properties:
-
       FunctionName: !GetAtt TxDailySMSFunction.Arn
-
       Action: lambda:InvokeFunction #allow invoking of lambda functions
-
       Principal: events.amazonaws.com #grant permission to the events system
-
       SourceArn: !GetAtt TxDailySMSCronEvent.Arn #define which event is allowed to trigger lambdas
 
-
-
   # The Daily SMS function
-
   TxDailySMSFunction:
-
     Type: AWS::Lambda::Function
-
     Properties:
-
       Runtime: go1.x
-
       Code:
-
         S3Bucket: !Ref CodeBucket
-
         S3Key: !Sub "txdailysms-v${Version}.zip"
-
       Handler: main
-
       MemorySize: 384
-
       Timeout: 900
-
       Environment:
-
         Variables:
-
           TableName: !Ref TrackingTable
-
           Region: !Ref "AWS::Region"
-
           NotifySecretArn: !Ref NotifyAPICredentials
-
           NotifySMSTemplateSecretArn: !Ref NotifySMSTemplateIds
-
           NotifyEmailTemplateSecretArn: !Ref NotifyEmailTemplateIds
-
       Role: !GetAtt TxRole.Arn
-
       VpcConfig:
-
         SecurityGroupIds:
-
           - !Ref NoIngressSecurityGroup
-
         SubnetIds:
-
           - !Ref PrivateSubnet1
-
           - !Ref PrivateSubnet2
-
-
 
   # SMS and Calls function log group
-
   TxSMSCallsFunctionLogGroup:
-
     Type: AWS::Logs::LogGroup
-
     Properties:
-
       LogGroupName: !Sub /aws/lambda/${TxSMSCallsFunction}
-
       RetentionInDays: 7
-
-
 
   # Schedule for triggering SMS and Calls function
-
   TxSMSCallsCronEvent: # logical name of the resource
-
     Type: AWS::Events::Rule
-
     Properties:
-
       ScheduleExpression: cron(0 7-19 * * ? *) #when the event should trigger (UTC)
-
       Targets:
-
         - Arn: !GetAtt TxSMSCallsFunction.Arn
-
           Id: !Ref TxSMSCallsFunction #unique name of the target
 
-
-
   # Permission to allow the function to be triggered by the cron event
-
   TxSMSCallsLambdaInvokePermission: #logical name of the resource
-
     Type: AWS::Lambda::Permission
-
     Properties:
-
       FunctionName: !GetAtt TxSMSCallsFunction.Arn
-
       Action: lambda:InvokeFunction #allow invoking of lambda functions
-
       Principal: events.amazonaws.com #grant permission to the events system
-
       SourceArn: !GetAtt TxSMSCallsCronEvent.Arn #define which event is allowed to trigger lambdas
 
-
-
   # The SMS and Calls function
-
   TxSMSCallsFunction:
-
     Type: AWS::Lambda::Function
-
     Properties:
-
       Runtime: go1.x
-
       Code:
-
         S3Bucket: !Ref CodeBucket
-
         S3Key: !Sub "txsmscalls-v${Version}.zip"
-
       Handler: main
-
       MemorySize: 384
-
       Timeout: 900
-
       Environment:
-
         Variables:
-
           TableName: !Ref TrackingTable
-
           Region: !Ref "AWS::Region"
-
           NotifySecretArn: !Ref NotifyAPICredentials
-
           NotifySMSTemplateSecretArn: !Ref NotifySMSTemplateIds
-
           NotifyEmailTemplateSecretArn: !Ref NotifyEmailTemplateIds
-
           TransferOutBucket: !Ref TransferOutBucket
 
-
-
       Role: !GetAtt TxRole.Arn
-
       VpcConfig:
-
         SecurityGroupIds:
-
           - !Ref NoIngressSecurityGroup
-
         SubnetIds:
-
           - !Ref PrivateSubnet1
-
           - !Ref PrivateSubnet2
-
-
 
   # Two Calls function log group
-
   TxTwoCallsFunctionLogGroup:
-
     Type: AWS::Logs::LogGroup
-
     Properties:
-
       LogGroupName: !Sub /aws/lambda/${TxTwoCallsFunction}
-
       RetentionInDays: 7
-
-
 
   # Schedule for triggering Two Calls function
-
   TxTwoCallsCronEvent: # logical name of the resource
-
     Type: AWS::Events::Rule
-
     Properties:
-
       ScheduleExpression: cron(0 7-19 * * ? *) #when the event should trigger (UTC)
-
       Targets:
-
         - Arn: !GetAtt TxTwoCallsFunction.Arn
-
           Id: !Ref TxTwoCallsFunction #unique name of the target
 
-
-
   # Permission to allow the function to be triggered by the cron event
-
   TxTwoCallsLambdaInvokePermission: #logical name of the resource
-
     Type: AWS::Lambda::Permission
-
     Properties:
-
       FunctionName: !GetAtt TxTwoCallsFunction.Arn
-
       Action: lambda:InvokeFunction #allow invoking of lambda functions
-
       Principal: events.amazonaws.com #grant permission to the events system
-
       SourceArn: !GetAtt TxTwoCallsCronEvent.Arn #define which event is allowed to trigger lambdas
 
-
-
   # The Two Calls function
-
   TxTwoCallsFunction:
-
     Type: AWS::Lambda::Function
-
     Properties:
-
       Runtime: go1.x
-
       Code:
-
         S3Bucket: !Ref CodeBucket
-
         S3Key: !Sub "tx2calls-v${Version}.zip"
-
       Handler: main
-
       MemorySize: 384
-
       Timeout: 900
-
       Environment:
-
         Variables:
-
           TableName: !Ref TrackingTable
-
           Region: !Ref "AWS::Region"
-
           TransferOutBucket: !Ref TransferOutBucket
-
       Role: !GetAtt TxRole.Arn
-
       VpcConfig:
-
         SecurityGroupIds:
-
           - !Ref NoIngressSecurityGroup
-
         SubnetIds:
-
           - !Ref PrivateSubnet1
-
           - !Ref PrivateSubnet2
-
-
 
   # BAU function log group
-
   TxBAUFunctionLogGroup:
-
     Type: AWS::Logs::LogGroup
-
     Properties:
-
       LogGroupName: !Sub /aws/lambda/${TxBAUFunction}
-
       RetentionInDays: 7
-
-
 
   # Schedule for triggering BAU function
-
   TxBAUCronEvent: # logical name of the resource
-
     Type: AWS::Events::Rule
-
     Properties:
-
       ScheduleExpression: cron(0 7-19 * * ? *) #when the event should trigger (UTC)
-
       Targets:
-
         - Arn: !GetAtt TxBAUFunction.Arn
-
           Id: !Ref TxBAUFunction #unique name of the target
 
-
-
   # Permission to allow the function to be triggered by the cron event
-
   TxBAULambdaInvokePermission: #logical name of the resource
-
     Type: AWS::Lambda::Permission
-
     Properties:
-
       FunctionName: !GetAtt TxBAUFunction.Arn
-
       Action: lambda:InvokeFunction #allow invoking of lambda functions
-
       Principal: events.amazonaws.com #grant permission to the events system
-
       SourceArn: !GetAtt TxBAUCronEvent.Arn #define which event is allowed to trigger lambdas
 
-
-
   # The BAU function
-
   TxBAUFunction:
-
     Type: AWS::Lambda::Function
-
     Properties:
-
       Runtime: go1.x
-
       Code:
-
         S3Bucket: !Ref CodeBucket
-
         S3Key: !Sub "txbau-v${Version}.zip"
-
       Handler: main
-
       MemorySize: 384
-
       Timeout: 900
-
       Environment:
-
         Variables:
-
           TableName: !Ref TrackingTable
-
           Region: !Ref "AWS::Region"
-
       Role: !GetAtt TxRole.Arn
-
       VpcConfig:
-
         SecurityGroupIds:
-
           - !Ref NoIngressSecurityGroup
-
         SubnetIds:
-
           - !Ref PrivateSubnet1
-
           - !Ref PrivateSubnet2
-
-
 
   # BAUPlus function log group
-
   TxBAUPlusFunctionLogGroup:
-
     Type: AWS::Logs::LogGroup
-
     Properties:
-
       LogGroupName: !Sub /aws/lambda/${TxBAUPlusFunction}
-
       RetentionInDays: 7
 
-
-
   # Schedule for triggering BAUPlus function
-
   TxBAUPlusCronEvent: # logical name of the resource
-
     Type: AWS::Events::Rule
-
     Properties:
-
       ScheduleExpression: cron(0 7-19 * * ? *) #when the event should trigger (UTC)
-
       Targets:
-
         - Arn: !GetAtt TxBAUPlusFunction.Arn
-
           Id: !Ref TxBAUPlusFunction #unique name of the target
 
-
-
   # Permission to allow the function to be triggered by the cron event
-
   TxBAUPlusLambdaInvokePermission: #logical name of the resource
-
     Type: AWS::Lambda::Permission
-
     Properties:
-
       FunctionName: !GetAtt TxBAUPlusFunction.Arn
-
       Action: lambda:InvokeFunction #allow invoking of lambda functions
-
       Principal: events.amazonaws.com #grant permission to the events system
-
       SourceArn: !GetAtt TxBAUPlusCronEvent.Arn #define which event is allowed to trigger lambdas
 
-
-
   # The BAUPlus function
-
   TxBAUPlusFunction:
-
     Type: AWS::Lambda::Function
-
     Properties:
-
       Runtime: go1.x
-
       Code:
-
         S3Bucket: !Ref CodeBucket
-
         S3Key: !Sub "txbauplus-v${Version}.zip"
-
       Handler: main
-
       MemorySize: 384
-
       Timeout: 900
-
       Environment:
-
         Variables:
-
           TableName: !Ref TrackingTable
-
           Region: !Ref "AWS::Region"
-
       Role: !GetAtt TxRole.Arn
-
       VpcConfig:
-
         SecurityGroupIds:
-
           - !Ref NoIngressSecurityGroup
-
         SubnetIds:
-
           - !Ref PrivateSubnet1
-
           - !Ref PrivateSubnet2
 
-
-
   # Permission to allow the RX function to be notified by S3
-
   LambdaInvokePermission:
-
     Type: "AWS::Lambda::Permission"
-
     Properties:
-
       FunctionName: !GetAtt RxFunction.Arn
-
       Action: "lambda:InvokeFunction"
-
       Principal: "s3.amazonaws.com"
-
       SourceAccount: !Sub ${AWS::AccountId}
-
       SourceArn: !GetAtt DataBucket.Arn
 
-
-
   RunAuthFunctionPolicy:
-
     Type: AWS::IAM::ManagedPolicy
-
     Properties:
-
       PolicyDocument:
-
         Version: 2012-10-17
-
         Statement:
-
           - Effect: Allow
-
             Action:
-
               - lambda:InvokeFunction
-
             Resource: !GetAtt AuthoriserFunction.Arn
 
-
-
   AuthInvocationRole:
-
     Type: AWS::IAM::Role
-
     Properties:
-
       AssumeRolePolicyDocument:
-
         Version: 2012-10-17
-
         Statement:
-
           - Effect: Allow
-
             Principal:
-
               Service:
-
                 - apigateway.amazonaws.com
-
             Action:
-
               - "sts:AssumeRole"
-
       ManagedPolicyArns:
-
         - !Ref RunAuthFunctionPolicy
 
-
-
   CallbackAuthorizer:
-
     Type: "AWS::ApiGateway::Authorizer"
-
     Properties:
-
       AuthorizerCredentials: !GetAtt AuthInvocationRole.Arn
-
       Name: callbackauthoriser
-
       AuthorizerResultTtlInSeconds: "5" #300
-
       AuthorizerUri: !Join
-
         - ""
-
         - - "arn:aws:apigateway:"
-
           - !Ref "AWS::Region"
-
           - ":lambda:path/2015-03-31/functions/"
-
           - !GetAtt
-
             - AuthoriserFunction
-
             - Arn
-
           - /invocations
-
       Type: TOKEN
-
       IdentitySource: method.request.header.Authorization
-
       RestApiId: !Ref apiGateway
 
-
-
   apiGateway:
-
     Type: "AWS::ApiGateway::RestApi"
-
     Properties:
-
       Description: "My API"
-
       Name: callbackapi
 
-
-
   apiGatewayRootMethod:
-
     Type: "AWS::ApiGateway::Method"
-
     Properties:
-
       AuthorizationType: "CUSTOM"
-
       AuthorizerId: !Ref CallbackAuthorizer
-
       HttpMethod: "POST"
-
       Integration:
-
         IntegrationHttpMethod: "POST"
-
         Type: "AWS_PROXY"
-
         Uri: !Sub
-
           - "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${lambdaArn}/invocations"
-
           - lambdaArn: !GetAtt "CallbackFunction.Arn"
-
       ResourceId: !GetAtt "apiGateway.RootResourceId"
-
       RestApiId: !Ref "apiGateway"
-
-
 
   apiGatewayDeployment:
-
     Type: "AWS::ApiGateway::Deployment"
-
     DependsOn:
-
       - "apiGatewayRootMethod"
-
     Properties:
-
       RestApiId: !Ref "apiGateway"
-
       StageName: !Ref "apiGatewayStageName"
 
-
-
   lambdaApiGatewayInvoke:
-
     Type: "AWS::Lambda::Permission"
-
     Properties:
-
       Action: "lambda:InvokeFunction"
-
       FunctionName: !GetAtt "CallbackFunction.Arn"
-
       Principal: "apigateway.amazonaws.com"
-
       SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${apiGateway}/*/POST/"
-
   lambdaApiGatewayAuthInvoke:
-
     Type: "AWS::Lambda::Permission"
-
     Properties:
-
       Action: "lambda:InvokeFunction"
-
       FunctionName: !GetAtt "AuthoriserFunction.Arn"
-
       Principal: "apigateway.amazonaws.com"
-
       SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${apiGateway}/*"
-
-
 
   # SFTP resources
 
-
-
   # This security group is used to allow access from the Internet to
-
   # our transfer instance
-
   # NOTE NOTE NOTE NOTE NOTE
-
   # This security group has to be MANUALLY attached in place of the default security group
-
   # This has to be done on the VPC Endpoint that will be created for the transfer service in the VPC
-
   SFTPSecurityGroup:
-
     Type: AWS::EC2::SecurityGroup
-
     Properties:
-
       GroupName: "sftp-sg"
-
       GroupDescription: "Security group to control access to sftp server"
-
       VpcId: !Ref VPC
-
       SecurityGroupIngress:
-
         - IpProtocol: "tcp"
-
           CidrIp: 204.153.11.0/24
-
           ToPort: 22
-
           FromPort: 22
-
           Description: Sitel1
-
         - IpProtocol: "tcp"
-
           CidrIp: 85.90.232.128/25
-
           ToPort: 22
-
           FromPort: 22
-
           Description: Sitel2
-
         - IpProtocol: "tcp"
-
           CidrIp: 193.240.244.128/25
-
           ToPort: 22
-
           FromPort: 22
-
           Description: Sitel3  
-
                                       
-
   # The DataOutputPolicy defines the access rights of users
-
   DataOutputPolicy:
-
     Type: AWS::IAM::ManagedPolicy
-
     Properties:
-
       Description: Policy to give users access to data output
-
       PolicyDocument:
-
         Version: 2012-10-17
-
         Statement:
-
           - Effect: Allow
-
             Action:
-
               - kms:Decrypt
-
               - kms:GenerateDataKey
-
             Resource: !GetAtt DataOutputStorageKey.Arn
-
           - Effect: Allow
-
             Action:
-
               - s3:GetObject
-
               - s3:PutObject
-
             Resource: !Sub "arn:aws:s3:::${TransferOutBucket}/*"
-
           - Effect: Allow
-
             Action:
-
               - s3:GetBucketLocation
-
               - s3:ListBucket
-
             Resource: !Sub "arn:aws:s3:::${TransferOutBucket}"
-
   # The DataOutputRole needs to be assigned to users of the transfer server to give them the right data access
-
   DataOutputRole:
-
     Type: AWS::IAM::Role
-
     Properties:
-
       AssumeRolePolicyDocument:
-
         Version: 2012-10-17
-
         Statement:
-
           - Effect: Allow
-
             Principal:
-
               Service:
-
                 - transfer.amazonaws.com
-
             Action:
-
               - "sts:AssumeRole"
-
       ManagedPolicyArns:
-
         - !Ref DataOutputPolicy
 
-
-
   # Encryption key for encrypting data in our outbound S3 bucket (separate to other storage)
-
   DataOutputStorageKey:
-
     Type: AWS::KMS::Key
-
     Properties:
-
       Description: Used to encrypt data at rest
-
       Enabled: True
-
       EnableKeyRotation: True
-
       KeyPolicy:
-
         Version: 2012-10-17
-
         Statement:
-
           - Sid: Enable IAM user permissions
-
             Effect: Allow
-
             Principal:
-
               AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
-
             Action: "kms:*"
-
             Resource: "*" # KMS permissions use * to refer to whole key
 
-
-
   # The transfer addresses are public IP addresses for the service (one per availability zone)
-
   TransferAddress1:
-
     Type: AWS::EC2::EIP
-
     Condition: DeployTransfer
-
     Properties:
-
       Domain: vpc
-
   TransferAddress2:
-
     Type: AWS::EC2::EIP
-
     Condition: DeployTransfer
-
     Properties:
-
       Domain: vpc
-
-
 
   # This policy allows the transfer server to write logs to cloudwatch
-
   TransferLogsPolicy:
-
     Type: AWS::IAM::ManagedPolicy
-
     Properties:
-
       PolicyDocument:
-
         Version: 2012-10-17
-
         Statement:
-
           - Effect: Allow
-
             Action:
-
               - logs:CreateLogStream
-
               - logs:DescribeLogStreams
-
               - logs:CreateLogGroup
-
               - logs:PutLogEvents
-
             Resource: "*"
-
-
 
   # This is the role that the transfer server can use to write to logs
-
   LoggingRole:
-
     Type: AWS::IAM::Role
-
     Properties:
-
       AssumeRolePolicyDocument:
-
         Version: 2012-10-17
-
         Statement:
-
           - Effect: Allow
-
             Principal:
-
               Service:
-
                 - transfer.amazonaws.com
-
             Action:
-
               - "sts:AssumeRole"
-
       ManagedPolicyArns:
-
         - !Ref TransferLogsPolicy
 
-
-
   # This is the bucket that we push files to, for SFTP users to be able to download
-
   TransferOutBucket:
-
     Type: AWS::S3::Bucket
-
     Properties:
-
       AccessControl: Private
-
       VersioningConfiguration:
-
         Status: Enabled        
-
       BucketEncryption:
-
         ServerSideEncryptionConfiguration:
-
           - ServerSideEncryptionByDefault:
-
               KMSMasterKeyID: !GetAtt DataOutputStorageKey.Arn
-
               SSEAlgorithm: aws:kms
-
       PublicAccessBlockConfiguration:
-
         BlockPublicAcls: True
-
         BlockPublicPolicy: True
-
         IgnorePublicAcls: True
-
         RestrictPublicBuckets: True
-
       LoggingConfiguration:
-
         DestinationBucketName: !Ref TransferOutBucketLog
-
         LogFilePrefix: transferbucket-logs        
 
-
-
   # This is the bucket for logs from the TransferOutBucket
-
   TransferOutBucketLog:
-
     Type: AWS::S3::Bucket
-
     Properties:
-
       AccessControl: LogDeliveryWrite
-
       BucketEncryption:
-
         ServerSideEncryptionConfiguration:
-
           - ServerSideEncryptionByDefault:
-
               KMSMasterKeyID: !GetAtt DataOutputStorageKey.Arn
-
               SSEAlgorithm: aws:kms
-
       PublicAccessBlockConfiguration:
-
         BlockPublicAcls: True
-
         BlockPublicPolicy: True
-
         IgnorePublicAcls: True
-
         RestrictPublicBuckets: True               
 
-
-
   # Denies all actions not carried out over https          
-
   S3HttpsPolicy:
-
     Type: AWS::S3::BucketPolicy
-
     Properties:
-
       Bucket: !Ref DataBucket
-
       PolicyDocument:
-
         Version: 2012-10-17
-
         Statement:
-
           - Effect: Deny
-
             Principal: "*"
-
             Action: 
-
               - s3:*
-
             Resource: 
-
               - !Sub "arn:aws:s3:::${DataBucket}"
-
             Condition:
-
               Bool:
-
                 aws:SecureTransport: false              
 
-
-
   # Denies all actions not carried out over https          
-
   S3HttpsTransferPolicy:
-
     Type: AWS::S3::BucketPolicy   
-
     Properties:
-
       Bucket: !Ref TransferOutBucket
-
       PolicyDocument:
-
         Version: 2012-10-17
-
         Statement:
-
           - Effect: Deny
-
             Principal: "*"
-
             Action: 
-
               - s3:*
-
             Resource: 
-
               - !Sub "arn:aws:s3:::${TransferOutBucket}"
-
             Condition:
-
               Bool:
-
                 aws:SecureTransport: false 
 
-
-
   # This defines the transfer server instance, sat on our public subnets
-
   TransferServer:
-
     Type: AWS::Transfer::Server
-
     Condition: DeployTransfer
-
     Properties:
-
       EndpointDetails:
-
         AddressAllocationIds:
-
           - !GetAtt TransferAddress1.AllocationId
-
           - !GetAtt TransferAddress2.AllocationId
-
         SubnetIds:
-
           - !Ref PublicSubnet1
-
           - !Ref PublicSubnet2
-
         VpcId: !Ref VPC
-
       EndpointType: VPC
-
       IdentityProviderType: SERVICE_MANAGED
-
       Protocols:
-
         - SFTP
-
       LoggingRole: !GetAtt LoggingRole.Arn
 
-
-
   # We create a log group for the transfer server to set a retention schedule for logs
-
   TransferLogGroup:
-
     Type: AWS::Logs::LogGroup
-
     Condition: DeployTransfer
-
     Properties:
-
       LogGroupName: !Sub /aws/transfer/${TransferServer.ServerId}
-
       RetentionInDays: 7
 
-
-
   # This policy allows the api gateway to write logs to cloudwatch
-
   APIGatewayLogsPolicy:
-
     Type: AWS::IAM::ManagedPolicy
-
     Properties:
-
       PolicyDocument:
-
         Version: 2012-10-17
-
         Statement:
-
           - Effect: Allow
-
             Action:
-
               - logs:CreateLogStream
-
               - logs:DescribeLogStreams
-
               - logs:CreateLogGroup
-
               - logs:PutLogEvents
-
             Resource: "*"
 
-
-
   # This is the role that the api gateway can use to write to logs
-
   APIGatewayLoggingRole:
-
     Type: AWS::IAM::Role
-
     Properties:
-
       AssumeRolePolicyDocument:
-
         Version: 2012-10-17
-
         Statement:
-
           - Effect: Allow
-
             Principal:
-
               Service:
-
                 - apigateway.amazonaws.com
-
             Action:
-
               - "sts:AssumeRole"
-
       ManagedPolicyArns:
-
         - !Ref APIGatewayLogsPolicy
 
-
-
 Outputs:
-
   apiGatewayInvokeURL:
-
     Value: !Sub "https://${apiGateway}.execute-api.${AWS::Region}.amazonaws.com/${apiGatewayStageName}"
-
   RxArn:
-
     Description: ARN for RxFunction
-
     Value: !GetAtt RxFunction.Arn
-
   TransferServerLocation:
-
     Condition: DeployTransfer
-
     Description: Name for connecting to SFTP server
-
     Value: !Sub "${TransferServer.ServerId}.server.transfer.${AWS::Region}.amazonaws.com"
