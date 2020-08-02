@@ -32,6 +32,9 @@ Parameters:
   apiGatewayStageName:
     Type: String
     Default: "api"
+  MonitoringEmail:
+    Type: String
+    Description: Email where all alerts AWS will send
 
 Conditions:
   CreateNotification: !Equals [!Ref FirstDeploy, "false"]
@@ -1018,11 +1021,27 @@ Resources:
       Description: "My API"
       Name: callbackapi
 
-  apiGatewayCloudWatchArn:
+  apiGatewayAccount:
     Type: "AWS::ApiGateway::Account"
     Properties:
-      CloudWatchRoleArn: !GettAtt
-        - 
+      CloudWatchRoleArn: !GetAtt "ApiLoggingRole.Arn"
+  
+  apiGatewayStage:
+    Type: "AWS::ApiGateway::Stage"
+    Properties:
+      AccessLogSetting:
+        DestinationArn: !GetAtt ApiLogGroup.Arn
+        Format: >-
+          { "requestId":"$context.requestId", "ip": "$context.identity.sourceIp", "caller":"$context.identity.caller", "user":"$context.identity.user","requestTime":"$context.requestTime", "httpMethod":"$context.httpMethod","resourcePath":"$context.resourcePath", "status":"$context.status","protocol":"$context.protocol", "responseLength":"$context.responseLength" }
+      RestApiId: !Ref "apiGateway"
+      DeploymentId: !Ref "apiGatewayDeployment"
+      StageName: !Ref apiGatewayStageName
+      MethodSettings:
+        - DataTraceEnabled: true
+          HttpMethod: "*"
+          LoggingLevel: INFO
+          ResourcePath: "/*"
+          MetricsEnabled: true
 
   apiGatewayRootMethod:
     Type: "AWS::ApiGateway::Method"
@@ -1043,6 +1062,7 @@ Resources:
     Type: "AWS::ApiGateway::Deployment"
     DependsOn:
       - "apiGatewayRootMethod"
+      - "apiGatewayAccount"
     Properties:
       RestApiId: !Ref "apiGateway"
       StageName: !Ref "apiGatewayStageName"
@@ -1061,6 +1081,43 @@ Resources:
       FunctionName: !GetAtt "AuthoriserFunction.Arn"
       Principal: "apigateway.amazonaws.com"
       SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${apiGateway}/*"
+
+  ApiLoggingPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - logs:CreateLogStream
+              - logs:DescribeLogStreams
+              - logs:CreateLogGroup
+              - logs:PutLogEvents
+              - logs:DescribeLogGroups
+              - logs:GetLogEvents
+              - logs:FilterLogEvents
+            Resource: !GetAtt ApiLogGroup.Arn
+
+  ApiLoggingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - apigateway.amazonaws.com
+            Action:
+              - "sts:AssumeRole"
+      ManagedPolicyArns:
+        - !Ref ApiLoggingPolicy
+  
+  ApiLogGroup:
+    Type: 'AWS::Logs::LogGroup'
+    Properties:
+      RetentionInDays: 7
 
   # SFTP resources
 
@@ -1291,82 +1348,387 @@ Resources:
       LogGroupName: !Sub /aws/transfer/${TransferServer.ServerId}
       RetentionInDays: 7
 
-  # This policy allows the api gateway to write logs to cloudwatch
-  APIGatewayLogsPolicy:
-    Type: AWS::IAM::ManagedPolicy
+  CloudTrailBucket:
+    Type: 'AWS::S3::Bucket'
     Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: True
+        BlockPublicPolicy: True
+        IgnorePublicAcls: True
+        RestrictPublicBuckets: True
+
+  CloudTrailBucketPolicy:
+    Type: 'AWS::S3::BucketPolicy'
+    Properties:
+      Bucket: !Ref CloudTrailBucket
       PolicyDocument:
-        Version: 2012-10-17
+        Version: '2012-10-17'
         Statement:
-          - Effect: Allow
-            Action:
-              - logs:CreateLogStream
-              - logs:DescribeLogStreams
-              - logs:CreateLogGroup
-              - logs:PutLogEvents
-            Resource: "*"
-
-  # This is the role that the api gateway can use to write to logs
-  APIGatewayLoggingRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: 2012-10-17
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service:
-                - apigateway.amazonaws.com
-            Action:
-              - "sts:AssumeRole"
-      ManagedPolicyArns:
-        - !Ref APIGatewayLogsPolicy
-
-  # CloudTrail to manage all changes to infrastructure
-  CloudTrailCloudWatchLogsRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Statement:
-        - Action: sts:AssumeRole
+        - Sid: AWSCloudTrailAclCheck
           Effect: Allow
           Principal:
-            Service: cloudtrail.amazonaws.com
-        Version: '2012-10-17'
-  
-  CloudTrailLogsPolicy: # The policy for your role
-    Type: AWS::IAM::Policy
-    Properties:
-      PolicyDocument:
-        Statement:
-        - Action:
-          - logs:PutLogEvents
-          - logs:CreateLogStream
+            Service: 'cloudtrail.amazonaws.com'
+          Action: 
+            - 's3:GetBucketAcl'
+          Resource: 
+            - !Sub 'arn:aws:s3:::${CloudTrailBucket}'
+        - Sid: AWSCloudTrailWrite
           Effect: Allow
-          Resource:
-            Fn::GetAtt:
-            - LogGroup
-            - Arn
+          Action: 's3:PutObject'
+          Principal:
+            Service: 'cloudtrail.amazonaws.com'
+          Resource: !Sub 'arn:aws:s3:::${CloudTrailBucket}/AWSLogs/${AWS::AccountId}/*'
+          Condition: 
+              StringEquals:
+                's3:x-amz-acl': 'bucket-owner-full-control'
+
+  CloudTrailLogGroup:
+    Type: 'AWS::Logs::LogGroup'
+    Properties:
+      RetentionInDays: 7
+
+  CloudTrailLogRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
         Version: '2012-10-17'
-      PolicyName: DefaultPolicy
-      Roles:
-      - Ref: CloudTrailCloudWatchLogsRole
+        Statement:
+        - Sid: AssumeRole
+          Effect: Allow
+          Principal:
+            Service: 'cloudtrail.amazonaws.com'
+          Action: 'sts:AssumeRole'
+      Policies:
+      - PolicyName: 'cloudtrail-policy'
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Sid: AWSCloudTrailCreateLogStream2014110
+            Effect: Allow
+            Action: 'logs:CreateLogStream'
+            Resource: !GetAtt CloudTrailLogGroup.Arn
+          - Sid: AWSCloudTrailPutLogEvents20141101
+            Effect: Allow
+            Action: 'logs:PutLogEvents'
+            Resource: !GetAtt CloudTrailLogGroup.Arn
 
   CloudTrail: # The trail
     Type: AWS::CloudTrail::Trail
     Properties:
+      CloudWatchLogsLogGroupArn: !GetAtt 'CloudTrailLogGroup.Arn'
+      CloudWatchLogsRoleArn: !GetAtt 'CloudTrailLogRole.Arn'
       IsLogging: true
-      CloudWatchLogsLogGroupArn:
-        Fn::GetAtt:
-        - LogGroup
-        - Arn
-      CloudWatchLogsRoleArn:
-        Fn::GetAtt:
-        - CloudTrailCloudWatchLogsRole
-        - Arn
-    DependsOn:
-    - CloudTrailLogsPolicy
-    - CloudTrailCloudWatchLogsRole
+      IncludeGlobalServiceEvents: True
+      IsMultiRegionTrail: True
+      S3BucketName: !Ref CloudTrailBucket
+
+  SecurityGroupChangesMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref CloudTrailLogGroup
+      FilterPattern: "{ ($.eventName = AuthorizeSecurityGroupIngress) || ($.eventName
+        = AuthorizeSecurityGroupEgress) || ($.eventName = RevokeSecurityGroupIngress)
+        || ($.eventName = RevokeSecurityGroupEgress) || ($.eventName = CreateSecurityGroup)
+        || ($.eventName = DeleteSecurityGroup) }"
+      MetricTransformations:
+      - MetricNamespace: CloudTrailMetrics
+        MetricName: SecurityGroupEventCount
+        MetricValue: '1'
+
+  SecurityGroupChangesAlarm:
+      Type: AWS::CloudWatch::Alarm
+      Properties:
+        AlarmName: CloudTrailSecurityGroupChanges
+        AlarmDescription: Alarms when an API call is made to create, update or delete a Security Group.
+        AlarmActions:
+        - Ref: AlarmNotificationTopic
+        MetricName: SecurityGroupEventCount
+        Namespace: CloudTrailMetrics
+        ComparisonOperator: GreaterThanOrEqualToThreshold
+        EvaluationPeriods: '1'
+        Period: '300'
+        Statistic: Sum
+        Threshold: '1'
+
+  NetworkAclChangesMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName:
+        Ref: CloudTrailLogGroup
+      FilterPattern: "{ ($.eventName = CreateNetworkAcl) || ($.eventName = CreateNetworkAclEntry)
+        || ($.eventName = DeleteNetworkAcl) || ($.eventName = DeleteNetworkAclEntry)
+        || ($.eventName = ReplaceNetworkAclEntry) || ($.eventName = ReplaceNetworkAclAssociation)
+        }"
+      MetricTransformations:
+      - MetricNamespace: CloudTrailMetrics
+        MetricName: NetworkAclEventCount
+        MetricValue: '1'
+
+  NetworkAclChangesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: CloudTrailNetworkAclChanges
+      AlarmDescription: Alarms when an API call is made to create, update or delete a Network ACL.
+      AlarmActions:
+      - Ref: AlarmNotificationTopic
+      MetricName: NetworkAclEventCount
+      Namespace: CloudTrailMetrics
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: '1'
+      Period: '300'
+      Statistic: Sum
+      Threshold: '1'
+
+  GatewayChangesMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName:
+        Ref: CloudTrailLogGroup
+      FilterPattern: "{ ($.eventName = CreateCustomerGateway) || ($.eventName = DeleteCustomerGateway)
+        || ($.eventName = AttachInternetGateway) || ($.eventName = CreateInternetGateway)
+        || ($.eventName = DeleteInternetGateway) || ($.eventName = DetachInternetGateway)
+        }"
+      MetricTransformations:
+      - MetricNamespace: CloudTrailMetrics
+        MetricName: GatewayEventCount
+        MetricValue: '1'
+
+  GatewayChangesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: CloudTrailGatewayChanges
+      AlarmDescription: Alarms when an API call is made to create, update or delete a Customer or Internet Gateway.
+      AlarmActions:
+      - Ref: AlarmNotificationTopic
+      MetricName: GatewayEventCount
+      Namespace: CloudTrailMetrics
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: '1'
+      Period: '300'
+      Statistic: Sum
+      Threshold: '1'
+
+  VpcChangesMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName:
+        Ref: CloudTrailLogGroup
+      FilterPattern: "{ ($.eventName = CreateVpc) || ($.eventName = DeleteVpc) ||
+        ($.eventName = ModifyVpcAttribute) || ($.eventName = AcceptVpcPeeringConnection)
+        || ($.eventName = CreateVpcPeeringConnection) || ($.eventName = DeleteVpcPeeringConnection)
+        || ($.eventName = RejectVpcPeeringConnection) || ($.eventName = AttachClassicLinkVpc)
+        || ($.eventName = DetachClassicLinkVpc) || ($.eventName = DisableVpcClassicLink)
+        || ($.eventName = EnableVpcClassicLink) }"
+      MetricTransformations:
+      - MetricNamespace: CloudTrailMetrics
+        MetricName: VpcEventCount
+        MetricValue: '1'
+
+  VpcChangesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: CloudTrailVpcChanges
+      AlarmDescription: Alarms when an API call is made to create, update or delete a VPC, VPC peering connection or VPC connection to classic.
+      AlarmActions:
+      - Ref: AlarmNotificationTopic
+      MetricName: VpcEventCount
+      Namespace: CloudTrailMetrics
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: '1'
+      Period: '300'
+      Statistic: Sum
+      Threshold: '1'
+
+  EC2InstanceChangesMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName:
+        Ref: CloudTrailLogGroup
+      FilterPattern: "{ ($.eventName = RunInstances) || ($.eventName = RebootInstances)
+        || ($.eventName = StartInstances) || ($.eventName = StopInstances) || ($.eventName
+        = TerminateInstances) }"
+      MetricTransformations:
+      - MetricNamespace: CloudTrailMetrics
+        MetricName: EC2InstanceEventCount
+        MetricValue: '1'
+
+  EC2InstanceChangesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: CloudTrailEC2InstanceChanges
+      AlarmDescription: Alarms when an API call is made to create, terminate, start, stop or reboot an EC2 instance.
+      AlarmActions:
+      - Ref: AlarmNotificationTopic
+      MetricName: EC2InstanceEventCount
+      Namespace: CloudTrailMetrics
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: '1'
+      Period: '300'
+      Statistic: Sum
+      Threshold: '1'
+
+  CloudTrailChangesMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName:
+        Ref: CloudTrailLogGroup
+      FilterPattern: "{ ($.eventName = CreateTrail) || ($.eventName = UpdateTrail)
+        || ($.eventName = DeleteTrail) || ($.eventName = StartLogging) || ($.eventName
+        = StopLogging) }"
+      MetricTransformations:
+      - MetricNamespace: CloudTrailMetrics
+        MetricName: CloudTrailEventCount
+        MetricValue: '1'
+
+  CloudTrailChangesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: CloudTrailChanges
+      AlarmDescription: Alarms when an API call is made to create, update or delete a CloudTrail trail, or to start or stop logging to a trail.
+      AlarmActions:
+      - Ref: AlarmNotificationTopic
+      MetricName: CloudTrailEventCount
+      Namespace: CloudTrailMetrics
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: '1'
+      Period: '300'
+      Statistic: Sum
+      Threshold: '1'
+
+  ConsoleSignInFailuresMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName:
+        Ref: CloudTrailLogGroup
+      FilterPattern: '{ ($.eventName = ConsoleLogin) && ($.errorMessage = "Failed
+        authentication") }'
+      MetricTransformations:
+      - MetricNamespace: CloudTrailMetrics
+        MetricName: ConsoleSignInFailureCount
+        MetricValue: '1'
+
+  ConsoleSignInFailuresAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: CloudTrailConsoleSignInFailures
+      AlarmDescription: Alarms when an unauthenticated API call is made to sign into the console.
+      AlarmActions:
+      - Ref: AlarmNotificationTopic
+      MetricName: ConsoleSignInFailureCount
+      Namespace: CloudTrailMetrics
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: '1'
+      Period: '300'
+      Statistic: Sum
+      Threshold: '3'
+
+  AuthorizationFailuresMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName:
+        Ref: CloudTrailLogGroup
+      FilterPattern: '{ ($.errorCode = "*UnauthorizedOperation") || ($.errorCode =
+        "AccessDenied*") }'
+      MetricTransformations:
+      - MetricNamespace: CloudTrailMetrics
+        MetricName: AuthorizationFailureCount
+        MetricValue: '1'
+
+  AuthorizationFailuresAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: CloudTrailAuthorizationFailures
+      AlarmDescription: Alarms when an unauthorized API call is made.
+      AlarmActions:
+      - Ref: AlarmNotificationTopic
+      MetricName: AuthorizationFailureCount
+      Namespace: CloudTrailMetrics
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: '1'
+      Period: '300'
+      Statistic: Sum
+      Threshold: '1'
+
+  IAMPolicyChangesMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName:
+        Ref: CloudTrailLogGroup
+      FilterPattern: "{($.eventName=DeleteGroupPolicy)||($.eventName=DeleteRolePolicy)||($.eventName=DeleteUserPolicy)||($.eventName=PutGroupPolicy)||($.eventName=PutRolePolicy)||($.eventName=PutUserPolicy)||($.eventName=CreatePolicy)||($.eventName=DeletePolicy)||($.eventName=CreatePolicyVersion)||($.eventName=DeletePolicyVersion)||($.eventName=AttachRolePolicy)||($.eventName=DetachRolePolicy)||($.eventName=AttachUserPolicy)||($.eventName=DetachUserPolicy)||($.eventName=AttachGroupPolicy)||($.eventName=DetachGroupPolicy)}"
+      MetricTransformations:
+      - MetricNamespace: CloudTrailMetrics
+        MetricName: IAMPolicyEventCount
+        MetricValue: '1'
+
+  IAMPolicyChangesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: CloudTrailIAMPolicyChanges
+      AlarmDescription: Alarms when an API call is made to change an IAM policy.
+      AlarmActions:
+      - Ref: AlarmNotificationTopic
+      MetricName: IAMPolicyEventCount
+      Namespace: CloudTrailMetrics
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: '1'
+      Period: '300'
+      Statistic: Sum
+      Threshold: '1'
+
+  S3ActivityMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref CloudTrailLogGroup
+      FilterPattern: "{($.eventSource = s3.amazonaws.com) && (($.eventName = PutBucketAcl) || ($.eventName = PutBucketPolicy) || ($.eventName = PutBucketCors) || ($.eventName = PutBucketLifecycle) || ($.eventName = PutBucketReplication) || ($.eventName = DeleteBucketPolicy) || ($.eventName = DeleteBucketCors) || ($.eventName = DeleteBucketLifecycle) || ($.eventName = DeleteBucketReplication))}"
+      MetricTransformations:
+      - MetricNamespace: CloudTrailMetrics
+        MetricName: S3ActivityMetricCount
+        MetricValue: '1'
+
+  S3ActivityAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: CloudTrailS3Activity
+      AlarmDescription: Alarms on S3 changes
+      AlarmActions:
+      - Ref: AlarmNotificationTopic
+      MetricName: S3ActivityMetricCount
+      Namespace: CloudTrailMetrics
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: '1'
+      Period: '300'
+      Statistic: Sum
+      Threshold: '1'
+  
+  ApiMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref ApiLogGroup
+      FilterPattern: "{($.status=400) || ($.status=401) || ($.status=403) || ($.status=500) || ($.status=501) || ($.status=502) || ($.status=503)}"
+      MetricTransformations:
+      - MetricNamespace: ApiActivityMetrics
+        MetricName: ApiActivityMetric
+        MetricValue: '1'
+
+  ApiActivityAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: ApiActivity
+      AlarmDescription: Alarms on Api unauthorised
+      MetricName: ApiActivityMetric
+      Namespace: ApiActivityMetrics
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: '1'
+      Period: '30'
+      Statistic: Sum
+      Threshold: '1'
+
+  AlarmNotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      Subscription:
+      - Endpoint: !Ref MonitoringEmail
+        Protocol: email
 
 Outputs:
   apiGatewayInvokeURL:
@@ -1376,5 +1738,5 @@ Outputs:
     Value: !GetAtt RxFunction.Arn
   TransferServerLocation:
     Condition: DeployTransfer
-    Description: Name for connecting to SFTP server
+    Description: Name for connecting to SFTP Server
     Value: !Sub "${TransferServer.ServerId}.server.transfer.${AWS::Region}.amazonaws.com"
