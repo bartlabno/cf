@@ -1,6 +1,6 @@
 # cf deployment instructions
 
-Copy template from DEV env
+Copy template from DEV env. Skip if you pushed changes from this repo
 
 ```bash
 aws s3 cp s3://notification-system-templates/ notification-system.yaml
