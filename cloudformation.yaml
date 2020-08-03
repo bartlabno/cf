@@ -1025,6 +1025,9 @@ Resources:
     Type: "AWS::ApiGateway::Account"
     Properties:
       CloudWatchRoleArn: !GetAtt "ApiLoggingRole.Arn"
+    DependsOn:
+      - ApiLoggingRole
+      - ApiLogGroup
   
   apiGatewayStage:
     Type: "AWS::ApiGateway::Stage"
@@ -1082,23 +1085,6 @@ Resources:
       Principal: "apigateway.amazonaws.com"
       SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${apiGateway}/*"
 
-  ApiLoggingPolicy:
-    Type: AWS::IAM::ManagedPolicy
-    Properties:
-      PolicyDocument:
-        Version: 2012-10-17
-        Statement:
-          - Effect: Allow
-            Action:
-              - logs:CreateLogStream
-              - logs:DescribeLogStreams
-              - logs:CreateLogGroup
-              - logs:PutLogEvents
-              - logs:DescribeLogGroups
-              - logs:GetLogEvents
-              - logs:FilterLogEvents
-            Resource: !GetAtt ApiLogGroup.Arn
-
   ApiLoggingRole:
     Type: AWS::IAM::Role
     Properties:
@@ -1111,8 +1097,9 @@ Resources:
                 - apigateway.amazonaws.com
             Action:
               - "sts:AssumeRole"
+      Path: "/"
       ManagedPolicyArns:
-        - !Ref ApiLoggingPolicy
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs"
   
   ApiLogGroup:
     Type: 'AWS::Logs::LogGroup'
@@ -1364,17 +1351,16 @@ Resources:
       PolicyDocument:
         Version: '2012-10-17'
         Statement:
-        - Sid: AWSCloudTrailAclCheck
-          Effect: Allow
+        - Effect: Allow
           Principal:
             Service: 'cloudtrail.amazonaws.com'
           Action: 
             - 's3:GetBucketAcl'
           Resource: 
             - !Sub 'arn:aws:s3:::${CloudTrailBucket}'
-        - Sid: AWSCloudTrailWrite
-          Effect: Allow
-          Action: 's3:PutObject'
+        - Effect: Allow
+          Action: 
+            - 's3:PutObject'
           Principal:
             Service: 'cloudtrail.amazonaws.com'
           Resource: !Sub 'arn:aws:s3:::${CloudTrailBucket}/AWSLogs/${AWS::AccountId}/*'
@@ -1389,6 +1375,9 @@ Resources:
 
   CloudTrailLogRole:
     Type: 'AWS::IAM::Role'
+    DependsOn:
+      - CloudTrailBucket
+      - CloudTrailBucketPolicy
     Properties:
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
