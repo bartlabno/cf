@@ -1029,22 +1029,22 @@ Resources:
       - ApiLoggingRole
       - ApiLogGroup
   
-  apiGatewayStage:
-    Type: "AWS::ApiGateway::Stage"
-    Properties:
-      AccessLogSetting:
-        DestinationArn: !GetAtt ApiLogGroup.Arn
-        Format: >-
-          { "requestId":"$context.requestId", "ip": "$context.identity.sourceIp", "caller":"$context.identity.caller", "user":"$context.identity.user","requestTime":"$context.requestTime", "httpMethod":"$context.httpMethod","resourcePath":"$context.resourcePath", "status":"$context.status","protocol":"$context.protocol", "responseLength":"$context.responseLength" }
-      RestApiId: !Ref "apiGateway"
-      DeploymentId: !Ref "apiGatewayDeployment"
-      StageName: !Ref apiGatewayStageName
-      MethodSettings:
-        - DataTraceEnabled: true
-          HttpMethod: "*"
-          LoggingLevel: INFO
-          ResourcePath: "/*"
-          MetricsEnabled: true
+  # apiGatewayStage:
+  #   Type: "AWS::ApiGateway::Stage"
+  #   Properties:
+  #     AccessLogSetting:
+  #       DestinationArn: !GetAtt ApiLogGroup.Arn
+  #       Format: >-
+  #         { "requestId":"$context.requestId", "ip": "$context.identity.sourceIp", "caller":"$context.identity.caller", "user":"$context.identity.user","requestTime":"$context.requestTime", "httpMethod":"$context.httpMethod","resourcePath":"$context.resourcePath", "status":"$context.status","protocol":"$context.protocol", "responseLength":"$context.responseLength" }
+  #     RestApiId: !Ref "apiGateway"
+  #     DeploymentId: !Ref "apiGatewayDeployment"
+  #     StageName: !Ref "apiGatewayStageName"
+  #     MethodSettings:
+  #       - DataTraceEnabled: true
+  #         HttpMethod: "*"
+  #         LoggingLevel: INFO
+  #         ResourcePath: "/*"
+  #         MetricsEnabled: true
 
   apiGatewayRootMethod:
     Type: "AWS::ApiGateway::Method"
@@ -1729,3 +1729,6 @@ Outputs:
     Condition: DeployTransfer
     Description: Name for connecting to SFTP Server
     Value: !Sub "${TransferServer.ServerId}.server.transfer.${AWS::Region}.amazonaws.com"
+  ApiLogArn:
+    Description: Paste this as value in your stage
+    Value: !GetAtt ApiLogGroup.Arn
